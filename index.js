@@ -4,9 +4,11 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import { v4 as uuid } from 'uuid';
+import cors from 'cors';
 
 dotenv.config();
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const client_id = process.env.SPOTIFY_CLIENT_ID;
@@ -131,49 +133,88 @@ app.get('/play', async (req, res) => {
 
 // --- Player CRUD ---
 app.post('/players', (req, res) => {
-  const { name, spotifyTrackId, startMs } = req.body;
-  const id = uuid();
+  try {
+    console.log('Received player data:', req.body);
+    const { name, spotifyTrackId, startMs } = req.body;
+    const id = uuid();
 
-  db.prepare(`
-    INSERT INTO players (id, name, spotify_track_id, start_ms, active)
-    VALUES (?, ?, ?, ?, 1)
-  `).run(id, name, spotifyTrackId, startMs);
+    db.prepare(`
+      INSERT INTO players (id, name, spotify_track_id, start_ms, active)
+      VALUES (?, ?, ?, ?, 1)
+    `).run(id, name, spotifyTrackId, startMs);
 
-  res.json({ id });
+    console.log('Player added successfully:', id);
+    res.json({ id });
+  } catch (err) {
+    console.error('Error adding player:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/players', (req, res) => {
-  const players = db.prepare(`SELECT * FROM players`).all();
-  res.json(players);
+  try {
+    const players = db.prepare(`SELECT * FROM players`).all();
+    res.json(players);
+  } catch (err) {
+    console.error('Error getting players:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Lineup ---
 app.post('/lineup', (req, res) => {
-  const { order } = req.body;
-  db.prepare(`DELETE FROM lineup`).run();
+  try {
+    const { order } = req.body;
+    console.log('Setting lineup:', order);
+    db.prepare(`DELETE FROM lineup`).run();
 
-  order.forEach((pid, i) => {
-    db.prepare(`INSERT INTO lineup (position, player_id) VALUES (?,?)`).run(i, pid);
-  });
+    order.forEach((pid, i) => {
+      db.prepare(`INSERT INTO lineup (position, player_id) VALUES (?,?)`).run(i, pid);
+    });
 
-  res.send('Lineup set');
+    console.log('Lineup saved successfully');
+    res.send('Lineup set');
+  } catch (err) {
+    console.error('Error setting lineup:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/lineup/next', async (req, res) => {
-  const deviceId = req.query.deviceId;
-  const row = db.prepare(`SELECT * FROM lineup ORDER BY position ASC LIMIT 1`).get();
-  if (!row) return res.send('No lineup');
+  try {
+    const deviceId = req.query.deviceId;
+    console.log('Next batter requested, deviceId:', deviceId);
+    
+    const row = db.prepare(`SELECT * FROM lineup ORDER BY position ASC LIMIT 1`).get();
+    if (!row) {
+      console.log('No lineup found');
+      return res.status(400).send('No lineup set. Please set up a lineup first.');
+    }
 
-  const player = db.prepare(`SELECT * FROM players WHERE id=?`).get(row.player_id);
+    console.log('Next player in lineup:', row);
+    const player = db.prepare(`SELECT * FROM players WHERE id=?`).get(row.player_id);
+    console.log('Player details:', player);
 
-  // Play player's song
-  await fetch(`http://127.0.0.1:3000/play?deviceId=${deviceId}&trackId=${player.spotify_track_id}&startMs=${player.start_ms}`, { method: 'GET' });
+    if (!player) {
+      console.log('Player not found for id:', row.player_id);
+      return res.status(404).send('Player not found');
+    }
 
-  // Rotate lineup
-  db.prepare(`DELETE FROM lineup WHERE player_id=?`).run(row.player_id);
-  db.prepare(`INSERT INTO lineup (position, player_id) VALUES (?,?)`).run(999, row.player_id);
+    // Play player's song
+    console.log(`Playing track ${player.spotify_track_id} at ${player.start_ms}ms on device ${deviceId}`);
+    const playResponse = await fetch(`http://127.0.0.1:3000/play?deviceId=${deviceId}&trackId=${player.spotify_track_id}&startMs=${player.start_ms}`, { method: 'GET' });
+    console.log('Play response status:', playResponse.status);
 
-  res.send(`Played ${player.name}`);
+    // Rotate lineup
+    db.prepare(`DELETE FROM lineup WHERE player_id=?`).run(row.player_id);
+    db.prepare(`INSERT INTO lineup (position, player_id) VALUES (?,?)`).run(999, row.player_id);
+
+    console.log(`Successfully played ${player.name}`);
+    res.send(`Played ${player.name}`);
+  } catch (err) {
+    console.error('Error in /lineup/next:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Start Server ---
