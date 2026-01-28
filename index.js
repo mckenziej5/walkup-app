@@ -76,7 +76,37 @@ app.get('/callback', async (req, res) => {
   const data = await tokenRes.json();
   spotifyToken = data.access_token;
 
-  res.send('Spotify connected. You can close this tab.');
+  res.send(`
+    <html>
+      <body>
+        <p>Spotify connected! You can close this window.</p>
+        <script>
+          // Send message to parent
+          if (window.opener) {
+            window.opener.postMessage('spotify-login-success', '*');
+          }
+          
+          // Try to close repeatedly
+          function attemptClose() {
+            try {
+              window.close();
+            } catch (e) {
+              console.log('Cannot close window');
+            }
+          }
+          
+          // Try immediately and every 100ms for 3 seconds
+          attemptClose();
+          let attempts = 0;
+          const interval = setInterval(() => {
+            attemptClose();
+            attempts++;
+            if (attempts > 30) clearInterval(interval);
+          }, 100);
+        </script>
+      </body>
+    </html>
+  `);
 });
 
 // --- Get Devices ---
@@ -88,6 +118,30 @@ app.get('/devices', async (req, res) => {
   });
 
   res.json(await r.json());
+});
+
+// --- Get Track Info ---
+app.get('/track/:trackId', async (req, res) => {
+  if (!spotifyToken) return res.status(401).send('No Spotify token. Please /login first.');
+
+  const { trackId } = req.params;
+  
+  try {
+    const r = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+      headers: { 'Authorization': `Bearer ${spotifyToken}` }
+    });
+
+    if (!r.ok) {
+      console.error(`Spotify API error for track ${trackId}: ${r.status}`);
+      return res.status(r.status).json({ name: 'Unknown Track', artist: '' });
+    }
+
+    const data = await r.json();
+    res.json({ name: data.name, artist: data.artists[0]?.name });
+  } catch (err) {
+    console.error('Error fetching track info:', err);
+    res.status(500).json({ name: 'Unknown Track', artist: '' });
+  }
 });
 
 // --- Play Track ---
@@ -131,6 +185,42 @@ app.get('/play', async (req, res) => {
   }
 });
 
+// --- Pause Playback ---
+app.post('/pause', async (req, res) => {
+  const { deviceId } = req.body;
+  if (!spotifyToken) return res.status(401).send('No Spotify token. Please /login first.');
+
+  try {
+    const response = await fetch(`https://api.spotify.com/v1/me/player/pause${deviceId ? `?device_id=${deviceId}` : ''}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${spotifyToken}` }
+    });
+
+    res.send('Paused');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error pausing playback');
+  }
+});
+
+// --- Resume Playback ---
+app.post('/play', async (req, res) => {
+  const { deviceId } = req.body;
+  if (!spotifyToken) return res.status(401).send('No Spotify token. Please /login first.');
+
+  try {
+    const response = await fetch(`https://api.spotify.com/v1/me/player/play${deviceId ? `?device_id=${deviceId}` : ''}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${spotifyToken}` }
+    });
+
+    res.send('Resumed');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error resuming playback');
+  }
+});
+
 // --- Player CRUD ---
 app.post('/players', (req, res) => {
   try {
@@ -157,6 +247,45 @@ app.get('/players', (req, res) => {
     res.json(players);
   } catch (err) {
     console.error('Error getting players:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/players/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log('Deleting player:', id);
+    
+    // Remove from lineup first
+    db.prepare(`DELETE FROM lineup WHERE player_id = ?`).run(id);
+    
+    // Remove player
+    db.prepare(`DELETE FROM players WHERE id = ?`).run(id);
+    
+    console.log('Player deleted successfully');
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting player:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/players/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, spotifyTrackId, startMs } = req.body;
+    console.log('Updating player:', id, req.body);
+
+    db.prepare(`
+      UPDATE players 
+      SET name = ?, spotify_track_id = ?, start_ms = ?
+      WHERE id = ?
+    `).run(name, spotifyTrackId, startMs, id);
+
+    console.log('Player updated successfully');
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating player:', err);
     res.status(500).json({ error: err.message });
   }
 });
